@@ -21,8 +21,14 @@ export class MusicBot {
     // Connect voice client (UDP)
     await this.connectVoice();
 
-    // Connect ServerQuery (TCP)
-    await this.connectQuery();
+    // Connect ServerQuery (TCP) — non-fatal if it fails
+    try {
+      await this.connectQuery();
+    } catch (err) {
+      console.warn(`[Query] ServerQuery connection failed: ${(err as Error).message}`);
+      console.warn("[Query] Bot will run without ServerQuery (voice-only mode)");
+      this.query = null;
+    }
 
     this.running = true;
     console.log("\n[Bot] Ready! Listening for commands in channel chat.");
@@ -89,6 +95,13 @@ export class MusicBot {
       );
     }
 
+    // Listen for text messages via voice protocol
+    this.voiceClient!.on("textmessage", (event: { msg: string; invokerName: string }) => {
+      handleMessage(event.msg, event.invokerName, this.player!, (response) => {
+        this.sendChannelMessage(response);
+      });
+    });
+
     // Create audio player
     this.player = new AudioPlayer(this.voiceClient!, Config.audio.volume);
 
@@ -114,14 +127,25 @@ export class MusicBot {
       `[Bot] Connecting ServerQuery to ${Config.ts.host}:${Config.ts.queryPort}...`
     );
 
-    this.query = await TeamSpeak.connect({
+    // Create instance first with autoConnect: false so we can attach
+    // the error handler BEFORE the connection attempt. This prevents
+    // late ssh2 'error' events from crashing the process.
+    const ts = new TeamSpeak({
       host: Config.ts.host,
       queryport: Config.ts.queryPort,
       username: Config.ts.queryUsername,
       password: Config.ts.queryPassword,
       nickname: `${Config.ts.botNickname}_query`,
       protocol: QueryProtocol.SSH,
+      autoConnect: false,
     });
+
+    ts.on("error", (err) => {
+      console.error("[Query] Error:", err.message);
+    });
+
+    await ts.connect();
+    this.query = ts;
 
     console.log("[Query] Connected to ServerQuery");
 
@@ -152,10 +176,6 @@ export class MusicBot {
       });
     });
 
-    this.query.on("error", (err) => {
-      console.error("[Query] Error:", err.message);
-    });
-
     this.query.on("close", () => {
       console.log("[Query] Connection closed");
       if (this.running) {
@@ -165,19 +185,20 @@ export class MusicBot {
     });
   }
 
-  private async sendChannelMessage(msg: string): Promise<void> {
-    try {
-      await this.query?.sendTextMessage(
-        "0", // channel ID 0 = current channel
-        TextMessageTargetMode.CHANNEL,
-        msg
-      );
-    } catch (err) {
-      console.error(
-        "[Bot] Failed to send message:",
-        (err as Error).message
-      );
+  private sendChannelMessage(msg: string): void {
+    // Prefer voice protocol (always available) over ServerQuery
+    if (this.voiceClient) {
+      this.voiceClient.sendTextMessage(msg);
+      return;
     }
+    // Fallback to ServerQuery if available
+    this.query?.sendTextMessage(
+      "0",
+      TextMessageTargetMode.CHANNEL,
+      msg
+    ).catch((e: Error) => {
+      console.error("[Bot] Failed to send message:", e.message);
+    });
   }
 
   async stop(): Promise<void> {

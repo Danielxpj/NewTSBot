@@ -171,19 +171,45 @@ export function eaxDecrypt(
 }
 
 /**
- * Derive encryption keys from the shared secret (after ECDH)
- *
- * TS3 uses: SHA-512(sharedSecret) -> first 16 bytes = key, next 16 = nonce/IV
+ * Derive the 64-byte SharedIV from the ECDH shared secret.
+ * SHA-512(sharedSecret) → 64 bytes used as input to per-packet key derivation.
  */
-export function deriveKeys(sharedSecret: Buffer): {
-  key: Buffer;
-  nonce: Buffer;
-} {
-  const hash = crypto.createHash("sha512").update(sharedSecret).digest();
-  return {
-    key: hash.subarray(0, 16),
-    nonce: hash.subarray(16, 32),
-  };
+export function deriveSharedIV(sharedSecret: Buffer): Buffer {
+  return crypto.createHash("sha512").update(sharedSecret).digest();
+}
+
+/**
+ * Derive per-packet AES key and nonce for TS3 new protocol (ot=1).
+ *
+ * For each (direction, packetType, generationId) tuple:
+ *   temp = [dir:1][type:1][gen:4][SharedIV:64] → SHA-256 → key(16) + nonce(16)
+ *
+ * Then per-packet: key[0] ^= (packetId >> 8), key[1] ^= (packetId & 0xFF)
+ *
+ * Direction: 0x30 = S→C, 0x31 = C→S
+ */
+export function derivePacketKeyNonce(
+  sharedIV: Buffer,
+  direction: "c2s" | "s2c",
+  packetType: number,
+  generationId: number,
+  packetId: number
+): { key: Buffer; nonce: Buffer } {
+  const temp = Buffer.alloc(70);
+  temp[0] = direction === "c2s" ? 0x31 : 0x30;
+  temp[1] = packetType;
+  temp.writeUInt32BE(generationId, 2);
+  sharedIV.copy(temp, 6, 0, 64);
+
+  const keyNonce = crypto.createHash("sha256").update(temp).digest();
+  const key = Buffer.from(keyNonce.subarray(0, 16));
+  const nonce = Buffer.from(keyNonce.subarray(16, 32));
+
+  // Per-packet: XOR packetId into key bytes 0-1
+  key[0] ^= (packetId >> 8) & 0xff;
+  key[1] ^= packetId & 0xff;
+
+  return { key, nonce };
 }
 
 /**
@@ -205,30 +231,3 @@ export function computeSharedSecret(
   return ecdh.computeSecret(serverPublicKey);
 }
 
-/**
- * TS3 uses a specific nonce generation for each packet.
- * The nonce is: baseNonce XOR generationId (as 16-byte big-endian)
- */
-export function generatePacketNonce(
-  baseNonce: Buffer,
-  generationId: number,
-  packetId: number,
-  isServerToClient: boolean
-): Buffer {
-  const nonce = Buffer.from(baseNonce);
-  // XOR with direction + generation + packetId
-  const temp = Buffer.alloc(16);
-  // Last 4 bytes: generation counter
-  temp.writeUInt32BE(generationId, 12);
-  // Byte at offset 8: direction (1 = server->client, 0 = client->server)
-  if (isServerToClient) {
-    temp[8] = 1;
-  }
-  // Bytes 10-11: packet ID
-  temp.writeUInt16BE(packetId, 10);
-
-  for (let i = 0; i < 16; i++) {
-    nonce[i] ^= temp[i];
-  }
-  return nonce;
-}

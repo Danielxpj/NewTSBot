@@ -196,7 +196,7 @@ export class AudioPipeline extends EventEmitter {
 /** Check if ffmpeg is available */
 export async function checkFfmpeg(): Promise<boolean> {
   return new Promise((resolve) => {
-    const proc = spawn("ffmpeg", ["-version"], {
+    const proc = spawn(Config.bin.ffmpeg, ["-version"], {
       stdio: ["ignore", "pipe", "pipe"],
     });
     proc.on("close", (code) => resolve(code === 0));

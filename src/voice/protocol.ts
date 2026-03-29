@@ -46,8 +46,8 @@ export interface Packet {
 /** TS3 version info to present during login */
 export const CLIENT_VERSION = {
   platform: "Windows",
-  version: "3.6.2 [Build: 1690193193]",
-  sign: "DX5NIYLvfJEUjuIbCidnoeozxIDRRkpq3I9vVMBmE9L2qnekOoBzSenkzsg2lC9CMv8K5hkEYAkT+a0jRatchw==",
+  version: "3.6.3 [Build: 1701166057]",
+  sign: "ML3yE6pV0QGyhc8o7k1bgqDSj+5gZIQFMjBNhWJ6L0FtJwniBq8l1wivx3DzgVVCvyRbzfg8MsdV/rjl5sHNCw==",
 };
 
 /** Known HWID for bots */

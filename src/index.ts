@@ -1,3 +1,5 @@
+import "./logger"; // must be first — patches console.* to write to logs/
+import { LOG_FILE } from "./logger";
 import { MusicBot } from "./bot";
 
 const bot = new MusicBot();
@@ -13,9 +15,9 @@ process.on("SIGTERM", async () => {
   process.exit(0);
 });
 
-process.on("unhandledRejection", (err) => {
-  console.error("[Fatal] Unhandled rejection:", err);
-});
+// unhandledRejection + uncaughtException are handled in logger.ts
+
+console.log(`[Boot] Log file: ${LOG_FILE}`);
 
 // Start
 bot.start().catch((err) => {
