@@ -39,11 +39,8 @@ const commands: Command[] = [
           ctx.send(
             `Queued #${ctx.player.getQueueLength()}: [b]${track.title}[/b] [${track.duration}]`
           );
-        } else {
-          ctx.send(
-            `Now playing: [b]${track.title}[/b] [${track.duration}]`
-          );
         }
+        // If queue was empty, trackStart event in bot.ts sends "Now playing"
       } catch (err) {
         ctx.send(`Error: ${(err as Error).message}`);
       }
