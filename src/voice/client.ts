@@ -986,6 +986,14 @@ export class VoiceClient extends EventEmitter {
     if (this.clientId === 0) {
       console.log(`${ts()} [Voice] clientId=0 after initserver, sending whoami to discover it`);
       this.sendCommandRaw("whoami");
+
+      // Fallback: if clientId still unknown after 1.5s, use clientfind for a clean response
+      setTimeout(() => {
+        if (this.clientId === 0 && this.state === "connected") {
+          console.log(`${ts()} [Voice] clientId still 0 — trying clientfind pattern=${this.options.nickname}`);
+          this.sendCommandRaw(`clientfind pattern=${ts3escape(this.options.nickname)}`);
+        }
+      }, 1500);
     }
   }
 
@@ -1059,7 +1067,7 @@ export class VoiceClient extends EventEmitter {
   private tryExtractClientId(cmd: string): void {
     const lower = cmd.toLowerCase();
     const nickname = this.options.nickname.toLowerCase();
-    const partial = nickname.length > 7 ? nickname.slice(-7) : nickname;
+    const partial = nickname.length > 4 ? nickname.slice(-4) : nickname;
 
     // Method 1: clean clid=XX with our nickname nearby
     const match = cmd.match(/clid=(\d+)/);
