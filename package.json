@@ -4,6 +4,7 @@
   "description": "TeamSpeak 3 music bot with YouTube playback",
   "main": "dist/index.js",
   "scripts": {
+    "setup": "tsx scripts/setup.ts",
     "build": "tsc",
     "start": "node dist/index.js",
     "dev": "tsx src/index.ts"

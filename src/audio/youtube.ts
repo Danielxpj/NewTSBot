@@ -1,4 +1,5 @@
 import { spawn } from "child_process";
+import { Config } from "../config";
 
 export interface TrackInfo {
   title: string;
@@ -64,7 +65,7 @@ export async function getAudioUrl(videoUrl: string): Promise<string> {
 
 function runYtDlp(args: string[]): Promise<string> {
   return new Promise((resolve, reject) => {
-    const proc = spawn("yt-dlp", args, {
+    const proc = spawn(Config.bin.ytdlp, args, {
       stdio: ["ignore", "pipe", "pipe"],
     });
 

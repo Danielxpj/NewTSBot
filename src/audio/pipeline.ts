@@ -1,6 +1,7 @@
 import { spawn, ChildProcess } from "child_process";
 import { EventEmitter } from "events";
 import OpusScript from "opusscript";
+import { Config } from "../config";
 
 const SAMPLE_RATE = 48000;
 const CHANNELS = 2;
@@ -42,7 +43,7 @@ export class AudioPipeline extends EventEmitter {
     return new Promise((resolve, reject) => {
       const volumeFilter = `volume=${this.volume}`;
       this.ffmpeg = spawn(
-        "ffmpeg",
+        Config.bin.ffmpeg,
         [
           "-reconnect", "1",
           "-reconnect_streamed", "1",
