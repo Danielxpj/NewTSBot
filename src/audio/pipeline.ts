@@ -21,6 +21,7 @@ export class AudioPipeline extends EventEmitter {
   private frameIndex = 0;
   private streamReady = false;
   private ffmpegDone = false;
+  private _loggedWaiting = false;
   private prebufferFrames = 25; // ~500ms prebuffer
 
   constructor(volume: number = 0.85) {
@@ -68,6 +69,7 @@ export class AudioPipeline extends EventEmitter {
       });
 
       this.ffmpeg.stdout?.on("end", () => {
+        console.log(`[Audio] stdout end — frames encoded: ${this.opusFrames.length}, frameIndex: ${this.frameIndex}`);
         this.ffmpegDone = true;
       });
 
@@ -99,6 +101,7 @@ export class AudioPipeline extends EventEmitter {
       });
 
       this.ffmpeg.on("close", (code) => {
+        console.log(`[Audio] ffmpeg close code=${code} playing=${this.playing} ffmpegDone=${this.ffmpegDone}`);
         this.ffmpegDone = true;
         if (this.playing) {
           // ffmpeg finished (end of stream)
@@ -136,13 +139,20 @@ export class AudioPipeline extends EventEmitter {
 
       if (this.frameIndex < this.opusFrames.length) {
         const frame = this.opusFrames[this.frameIndex++];
+        this._loggedWaiting = false;
         this.emit("frame", frame);
       } else if (this.ffmpegDone) {
         // ffmpeg done and all frames played
+        console.log(`[Audio] All frames played (${this.frameIndex}/${this.opusFrames.length}), emitting end`);
         this.stop();
         this.emit("end");
+      } else {
+        // Buffer underrun — log once
+        if (!this._loggedWaiting) {
+          console.log(`[Audio] Waiting for ffmpeg: frameIndex=${this.frameIndex} totalFrames=${this.opusFrames.length} ffmpegDone=${this.ffmpegDone}`);
+          this._loggedWaiting = true;
+        }
       }
-      // else: buffer underrun, wait for more frames
     }, FRAME_DURATION_MS);
   }
 
