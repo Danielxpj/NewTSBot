@@ -37,7 +37,7 @@ const commands: Command[] = [
         const track = await ctx.player.addTrack(query, ctx.invokerName);
         if (ctx.player.getQueueLength() > 0) {
           ctx.send(
-            `Queued #${ctx.player.getQueueLength()}: [b]${track.title}[/b] [${track.duration}]`
+            `Queued #${ctx.player.getQueueLength()}: ${track.title} [${track.duration}]`
           );
         }
         // If queue was empty, trackStart event in bot.ts sends "Now playing"
@@ -62,7 +62,7 @@ const commands: Command[] = [
     execute(ctx) {
       const skipped = ctx.player.skip();
       if (skipped) {
-        ctx.send(`Skipped: [b]${skipped.title}[/b]`);
+        ctx.send(`Skipped: ${skipped.title}`);
       } else {
         ctx.send("Nothing is playing.");
       }
@@ -78,7 +78,7 @@ const commands: Command[] = [
 
       let msg = "";
       if (np) {
-        msg += `Now playing: [b]${np.title}[/b] [${np.duration}]\n`;
+        msg += `Now playing: ${np.title} [${np.duration}]\n`;
       } else {
         msg += "Nothing is playing.\n";
       }
@@ -107,7 +107,7 @@ const commands: Command[] = [
       if (np) {
         const status = ctx.player.isPaused() ? "(paused)" : "";
         ctx.send(
-          `Now playing: [b]${np.title}[/b] [${np.duration}] ${status} (requested by ${np.requestedBy})`
+          `Now playing: ${np.title} [${np.duration}] ${status} (requested by ${np.requestedBy})`
         );
       } else {
         ctx.send("Nothing is playing.");

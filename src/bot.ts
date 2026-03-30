@@ -107,7 +107,7 @@ export class MusicBot {
 
     this.player.on("trackStart", (track) => {
       this.sendChannelMessage(
-        `Now playing: [b]${track.title}[/b] [${track.duration}]`
+        `Now playing: ${track.title} [${track.duration}]`
       );
     });
 
