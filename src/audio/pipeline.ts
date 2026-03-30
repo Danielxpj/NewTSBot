@@ -102,6 +102,8 @@ export class AudioPipeline extends EventEmitter {
             this.startFrameTimer();
             resolve();
           }
+          // Null out ffmpeg so the frame timer knows ffmpeg is done
+          this.ffmpeg = null;
         }
       });
 
