@@ -20,6 +20,7 @@ export class AudioPipeline extends EventEmitter {
   private opusFrames: Buffer[] = [];
   private frameIndex = 0;
   private streamReady = false;
+  private ffmpegDone = false;
   private prebufferFrames = 25; // ~500ms prebuffer
 
   constructor(volume: number = 0.85) {
@@ -37,6 +38,7 @@ export class AudioPipeline extends EventEmitter {
     this.opusFrames = [];
     this.frameIndex = 0;
     this.streamReady = false;
+    this.ffmpegDone = false;
     this.playing = true;
     this.paused = false;
 
@@ -63,6 +65,10 @@ export class AudioPipeline extends EventEmitter {
 
       this.ffmpeg.stderr?.on("data", () => {
         // ffmpeg logs to stderr, ignore unless debugging
+      });
+
+      this.ffmpeg.stdout?.on("end", () => {
+        this.ffmpegDone = true;
       });
 
       this.ffmpeg.stdout?.on("data", (chunk: Buffer) => {
@@ -93,6 +99,7 @@ export class AudioPipeline extends EventEmitter {
       });
 
       this.ffmpeg.on("close", (code) => {
+        this.ffmpegDone = true;
         if (this.playing) {
           // ffmpeg finished (end of stream)
           // Let remaining frames play out, then emit 'end'
@@ -102,8 +109,6 @@ export class AudioPipeline extends EventEmitter {
             this.startFrameTimer();
             resolve();
           }
-          // Null out ffmpeg so the frame timer knows ffmpeg is done
-          this.ffmpeg = null;
         }
       });
 
@@ -132,7 +137,7 @@ export class AudioPipeline extends EventEmitter {
       if (this.frameIndex < this.opusFrames.length) {
         const frame = this.opusFrames[this.frameIndex++];
         this.emit("frame", frame);
-      } else if (!this.ffmpeg || this.ffmpeg.killed) {
+      } else if (this.ffmpegDone) {
         // ffmpeg done and all frames played
         this.stop();
         this.emit("end");
@@ -146,6 +151,7 @@ export class AudioPipeline extends EventEmitter {
     this.playing = false;
     this.paused = false;
     this.streamReady = false;
+    this.ffmpegDone = false;
 
     if (this.frameTimer) {
       clearInterval(this.frameTimer);
