@@ -8,25 +8,81 @@ const CHANNELS = 2;
 const FRAME_DURATION_MS = 20;
 const FRAME_SIZE = (SAMPLE_RATE * FRAME_DURATION_MS) / 1000; // 960 samples
 const PCM_FRAME_BYTES = FRAME_SIZE * CHANNELS * 2; // 960 * 2 * 2 = 3840 bytes
+const FRAME_DURATION_NS = BigInt(FRAME_DURATION_MS) * 1_000_000n; // 20ms in nanoseconds
+
+// Fade duration in frames (each frame = 20ms)
+const FADE_FRAMES = 15; // 300ms fade-in / fade-out
+
+// PCM buffer pool to reduce GC pressure
+const PCM_POOL_SIZE = 256 * 1024; // 256KB pre-allocated buffer
+
+// Silence frame — a single encoded silent Opus frame for underrun fill
+let SILENCE_FRAME: Buffer | null = null;
+
+function getSilenceFrame(encoder: OpusScript): Buffer {
+  if (!SILENCE_FRAME) {
+    const silentPcm = Buffer.alloc(PCM_FRAME_BYTES, 0);
+    const encoded = encoder.encode(silentPcm, FRAME_SIZE);
+    SILENCE_FRAME = Buffer.from(encoded);
+  }
+  return SILENCE_FRAME;
+}
 
 export class AudioPipeline extends EventEmitter {
   private ffmpeg: ChildProcess | null = null;
   private encoder: OpusScript | null = null;
-  private pcmBuffer: Buffer = Buffer.alloc(0);
+  private pcmPool: Buffer = Buffer.alloc(PCM_POOL_SIZE);
+  private pcmPoolUsed = 0;
   private playing = false;
   private paused = false;
   private volume: number;
-  private frameTimer: ReturnType<typeof setInterval> | null = null;
+  private frameTimer: ReturnType<typeof setTimeout> | null = null;
   private opusFrames: Buffer[] = [];
   private frameIndex = 0;
   private streamReady = false;
   private ffmpegDone = false;
   private _loggedWaiting = false;
-  private prebufferFrames = 25; // ~500ms prebuffer
+  private prebufferFrames = 40; // ~800ms prebuffer for smoother start
+  private totalFrameCount = 0; // total frames encoded (for fade tracking)
+  private underrunCount = 0; // consecutive underruns for adaptive silence
+  // Ring buffer of last FADE_FRAMES PCM frames for fade-out re-encoding
+  private recentPcmFrames: Buffer[] = [];
+  // Generation counter to discard stale ffmpeg events after stop/skip
+  private generation = 0;
 
   constructor(volume: number = 0.85) {
     super();
     this.volume = volume;
+  }
+
+  /** Apply fade-in/fade-out gain to a PCM frame in-place */
+  private applyFade(pcm: Buffer, frameNumber: number, totalEncoded: number, isFinalBatch: boolean): void {
+    let gain = 1.0;
+
+    // Fade-in: ramp up over first FADE_FRAMES
+    if (frameNumber < FADE_FRAMES) {
+      // Smooth ease-in curve (sine)
+      gain = Math.sin((frameNumber / FADE_FRAMES) * (Math.PI / 2));
+    }
+
+    // Fade-out: ramp down over last FADE_FRAMES (only if we know stream is ending)
+    if (isFinalBatch && totalEncoded >= FADE_FRAMES) {
+      const framesFromEnd = totalEncoded - frameNumber;
+      if (framesFromEnd <= FADE_FRAMES) {
+        // Smooth ease-out curve (cosine)
+        const fadeOutGain = Math.sin((framesFromEnd / FADE_FRAMES) * (Math.PI / 2));
+        gain = Math.min(gain, fadeOutGain);
+      }
+    }
+
+    if (gain >= 0.999) return; // no change needed
+
+    // Apply gain to every 16-bit sample
+    const sampleCount = pcm.length / 2;
+    for (let i = 0; i < sampleCount; i++) {
+      const sample = pcm.readInt16LE(i * 2);
+      pcm.writeInt16LE(Math.round(sample * gain), i * 2);
+    }
   }
 
   /** Start streaming audio from a URL through ffmpeg → Opus */
@@ -35,13 +91,17 @@ export class AudioPipeline extends EventEmitter {
 
     this.encoder = new OpusScript(SAMPLE_RATE, CHANNELS, OpusScript.Application.AUDIO);
     this.encoder.setBitrate(96000);
-    this.pcmBuffer = Buffer.alloc(0);
+    this.pcmPoolUsed = 0;
     this.opusFrames = [];
     this.frameIndex = 0;
     this.streamReady = false;
     this.ffmpegDone = false;
     this.playing = true;
     this.paused = false;
+    this.totalFrameCount = 0;
+    this.underrunCount = 0;
+    this.recentPcmFrames = [];
+    const gen = ++this.generation;
 
     return new Promise((resolve, reject) => {
       const volumeFilter = `volume=${this.volume}`;
@@ -69,20 +129,39 @@ export class AudioPipeline extends EventEmitter {
       });
 
       this.ffmpeg.stdout?.on("end", () => {
+        if (this.generation !== gen) return; // stale ffmpeg from previous track
         console.log(`[Audio] stdout end — frames encoded: ${this.opusFrames.length}, frameIndex: ${this.frameIndex}`);
         this.ffmpegDone = true;
       });
 
       this.ffmpeg.stdout?.on("data", (chunk: Buffer) => {
-        if (!this.playing) return;
+        if (!this.playing || this.generation !== gen) return;
 
-        // Append to PCM buffer
-        this.pcmBuffer = Buffer.concat([this.pcmBuffer, chunk]);
+        // Append to pooled PCM buffer (grow if needed)
+        if (this.pcmPoolUsed + chunk.length > this.pcmPool.length) {
+          const newSize = Math.max(this.pcmPool.length * 2, this.pcmPoolUsed + chunk.length);
+          const newPool = Buffer.alloc(newSize);
+          this.pcmPool.copy(newPool, 0, 0, this.pcmPoolUsed);
+          this.pcmPool = newPool;
+        }
+        chunk.copy(this.pcmPool, this.pcmPoolUsed);
+        this.pcmPoolUsed += chunk.length;
 
         // Encode complete frames to Opus
-        while (this.pcmBuffer.length >= PCM_FRAME_BYTES) {
-          const frame = this.pcmBuffer.subarray(0, PCM_FRAME_BYTES);
-          this.pcmBuffer = this.pcmBuffer.subarray(PCM_FRAME_BYTES);
+        let offset = 0;
+        while (offset + PCM_FRAME_BYTES <= this.pcmPoolUsed) {
+          const frame = Buffer.from(this.pcmPool.subarray(offset, offset + PCM_FRAME_BYTES));
+          offset += PCM_FRAME_BYTES;
+
+          // Apply fade-in to early frames
+          this.applyFade(frame, this.totalFrameCount, 0, false);
+          this.totalFrameCount++;
+
+          // Keep a ring buffer of recent PCM for fade-out re-encoding
+          this.recentPcmFrames.push(Buffer.from(frame));
+          if (this.recentPcmFrames.length > FADE_FRAMES) {
+            this.recentPcmFrames.shift();
+          }
 
           try {
             const opusFrame = this.encoder!.encode(frame, FRAME_SIZE);
@@ -90,6 +169,15 @@ export class AudioPipeline extends EventEmitter {
           } catch (err) {
             console.error("[Audio] Opus encode error:", (err as Error).message);
           }
+        }
+
+        // Shift remaining bytes to start of pool
+        if (offset > 0) {
+          const remaining = this.pcmPoolUsed - offset;
+          if (remaining > 0) {
+            this.pcmPool.copyWithin(0, offset, this.pcmPoolUsed);
+          }
+          this.pcmPoolUsed = remaining;
         }
 
         // Start playback after prebuffer is filled
@@ -101,8 +189,16 @@ export class AudioPipeline extends EventEmitter {
       });
 
       this.ffmpeg.on("close", (code) => {
+        if (this.generation !== gen) {
+          console.log(`[Audio] ffmpeg close (stale gen=${gen}, current=${this.generation}) — ignoring`);
+          return;
+        }
         console.log(`[Audio] ffmpeg close code=${code} playing=${this.playing} ffmpegDone=${this.ffmpegDone}`);
         this.ffmpegDone = true;
+
+        // Re-encode last FADE_FRAMES with fade-out applied
+        this.applyFadeOutToTail();
+
         if (this.playing) {
           // ffmpeg finished (end of stream)
           // Let remaining frames play out, then emit 'end'
@@ -130,30 +226,90 @@ export class AudioPipeline extends EventEmitter {
     });
   }
 
+  /** Re-encode the tail frames with fade-out applied for smooth ending */
+  private applyFadeOutToTail(): void {
+    if (!this.encoder) return;
+    const total = this.opusFrames.length;
+    const pcmCount = this.recentPcmFrames.length;
+    if (total < pcmCount || pcmCount === 0) return;
+
+    // Re-encode the last pcmCount frames with fade-out gain
+    for (let i = 0; i < pcmCount; i++) {
+      const pcm = this.recentPcmFrames[i];
+      const framesFromEnd = pcmCount - i;
+      // Sine ease-out curve
+      const gain = Math.sin((framesFromEnd / pcmCount) * (Math.PI / 2));
+
+      if (gain < 0.999) {
+        const sampleCount = pcm.length / 2;
+        for (let s = 0; s < sampleCount; s++) {
+          const sample = pcm.readInt16LE(s * 2);
+          pcm.writeInt16LE(Math.round(sample * gain), s * 2);
+        }
+      }
+
+      try {
+        const opusFrame = this.encoder.encode(pcm, FRAME_SIZE);
+        // Replace the corresponding opus frame in the array
+        this.opusFrames[total - pcmCount + i] = Buffer.from(opusFrame);
+      } catch (err) {
+        console.error("[Audio] Fade-out re-encode error:", (err as Error).message);
+      }
+    }
+    this.recentPcmFrames = [];
+  }
+
   private startFrameTimer(): void {
     if (this.frameTimer) return;
 
-    // Send frames at 20ms intervals
-    this.frameTimer = setInterval(() => {
-      if (this.paused || !this.playing) return;
+    // High-resolution drift-compensating timer
+    // Instead of setInterval (which drifts ~1-5ms per tick), we use
+    // setTimeout with hrtime correction to maintain precise 20ms cadence
+    let nextFrameTime = process.hrtime.bigint();
+
+    const tick = () => {
+      if (!this.playing) return;
+      if (this.paused) {
+        // While paused, keep ticking but reset the time anchor
+        this.frameTimer = setTimeout(tick, FRAME_DURATION_MS);
+        nextFrameTime = process.hrtime.bigint() + FRAME_DURATION_NS;
+        return;
+      }
 
       if (this.frameIndex < this.opusFrames.length) {
         const frame = this.opusFrames[this.frameIndex++];
         this._loggedWaiting = false;
+        this.underrunCount = 0;
         this.emit("frame", frame);
       } else if (this.ffmpegDone) {
         // ffmpeg done and all frames played
         console.log(`[Audio] All frames played (${this.frameIndex}/${this.opusFrames.length}), emitting end`);
         this.stop();
         this.emit("end");
+        return; // don't schedule next tick
       } else {
-        // Buffer underrun — log once
-        if (!this._loggedWaiting) {
-          console.log(`[Audio] Waiting for ffmpeg: frameIndex=${this.frameIndex} totalFrames=${this.opusFrames.length} ffmpegDone=${this.ffmpegDone}`);
-          this._loggedWaiting = true;
+        // Buffer underrun — send silence to avoid pops/clicks
+        this.underrunCount++;
+        if (this.underrunCount === 1) {
+          console.log(`[Audio] Buffer underrun at frameIndex=${this.frameIndex}, filling with silence`);
+        }
+        if (this.encoder) {
+          this.emit("frame", getSilenceFrame(this.encoder));
         }
       }
-    }, FRAME_DURATION_MS);
+
+      // Calculate drift-compensated delay for next frame
+      nextFrameTime += FRAME_DURATION_NS;
+      const now = process.hrtime.bigint();
+      const drift = nextFrameTime - now;
+      // Convert ns to ms, clamp to [1, FRAME_DURATION_MS * 2] to avoid negative/huge delays
+      const delayMs = Math.max(1, Math.min(FRAME_DURATION_MS * 2, Number(drift) / 1_000_000));
+
+      this.frameTimer = setTimeout(tick, delayMs);
+    };
+
+    nextFrameTime = process.hrtime.bigint() + FRAME_DURATION_NS;
+    this.frameTimer = setTimeout(tick, FRAME_DURATION_MS);
   }
 
   /** Stop the audio pipeline */
@@ -164,7 +320,7 @@ export class AudioPipeline extends EventEmitter {
     this.ffmpegDone = false;
 
     if (this.frameTimer) {
-      clearInterval(this.frameTimer);
+      clearTimeout(this.frameTimer);
       this.frameTimer = null;
     }
 
@@ -180,7 +336,7 @@ export class AudioPipeline extends EventEmitter {
 
     this.opusFrames = [];
     this.frameIndex = 0;
-    this.pcmBuffer = Buffer.alloc(0);
+    this.pcmPoolUsed = 0;
   }
 
   /** Pause playback */
