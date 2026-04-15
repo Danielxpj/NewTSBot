@@ -102,7 +102,7 @@ export class AudioPipeline extends EventEmitter {
 
     return new Promise((resolve, reject) => {
       const volumeFilter = `volume=${this.volume}`;
-      this.ffmpeg = spawn(
+      const proc = spawn(
         Config.bin.ffmpeg,
         [
           "-reconnect", "1",
@@ -120,18 +120,22 @@ export class AudioPipeline extends EventEmitter {
           stdio: ["ignore", "pipe", "pipe"],
         }
       );
+      this.ffmpeg = proc;
+      // Guard: ignore events from a ffmpeg that has been replaced/stopped
+      const isCurrent = () => this.ffmpeg === proc;
 
-      this.ffmpeg.stderr?.on("data", () => {
+      proc.stderr?.on("data", () => {
         // ffmpeg logs to stderr, ignore unless debugging
       });
 
-      this.ffmpeg.stdout?.on("end", () => {
+      proc.stdout?.on("end", () => {
+        if (!isCurrent()) return;
         console.log(`[Audio] stdout end — frames encoded: ${this.opusFrames.length}, frameIndex: ${this.frameIndex}`);
         this.ffmpegDone = true;
       });
 
-      this.ffmpeg.stdout?.on("data", (chunk: Buffer) => {
-        if (!this.playing) return;
+      proc.stdout?.on("data", (chunk: Buffer) => {
+        if (!isCurrent() || !this.playing) return;
 
         // Append to pooled PCM buffer (grow if needed)
         if (this.pcmPoolUsed + chunk.length > this.pcmPool.length) {
@@ -184,7 +188,11 @@ export class AudioPipeline extends EventEmitter {
         }
       });
 
-      this.ffmpeg.on("close", (code) => {
+      proc.on("close", (code) => {
+        if (!isCurrent()) {
+          console.log(`[Audio] stale ffmpeg close code=${code} (ignored)`);
+          return;
+        }
         console.log(`[Audio] ffmpeg close code=${code} playing=${this.playing} ffmpegDone=${this.ffmpegDone}`);
         this.ffmpegDone = true;
 
@@ -203,7 +211,8 @@ export class AudioPipeline extends EventEmitter {
         }
       });
 
-      this.ffmpeg.on("error", (err) => {
+      proc.on("error", (err) => {
+        if (!isCurrent()) return;
         this.stop();
         reject(new Error(`ffmpeg error: ${err.message}`));
       });
@@ -317,8 +326,14 @@ export class AudioPipeline extends EventEmitter {
     }
 
     if (this.ffmpeg) {
-      this.ffmpeg.kill("SIGKILL");
-      this.ffmpeg = null;
+      const old = this.ffmpeg;
+      this.ffmpeg = null; // flip identity first so isCurrent() guards fire
+      old.stdout?.removeAllListeners();
+      old.stderr?.removeAllListeners();
+      old.removeAllListeners("close");
+      old.removeAllListeners("error");
+      old.on("error", () => { /* swallow post-kill errors */ });
+      old.kill("SIGKILL");
     }
 
     if (this.encoder) {
