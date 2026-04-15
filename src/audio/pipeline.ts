@@ -47,8 +47,6 @@ export class AudioPipeline extends EventEmitter {
   private underrunCount = 0; // consecutive underruns for adaptive silence
   // Ring buffer of last FADE_FRAMES PCM frames for fade-out re-encoding
   private recentPcmFrames: Buffer[] = [];
-  // Generation counter to discard stale ffmpeg events after stop/skip
-  private generation = 0;
 
   constructor(volume: number = 0.85) {
     super();
@@ -101,7 +99,6 @@ export class AudioPipeline extends EventEmitter {
     this.totalFrameCount = 0;
     this.underrunCount = 0;
     this.recentPcmFrames = [];
-    const gen = ++this.generation;
 
     return new Promise((resolve, reject) => {
       const volumeFilter = `volume=${this.volume}`;
@@ -129,13 +126,12 @@ export class AudioPipeline extends EventEmitter {
       });
 
       this.ffmpeg.stdout?.on("end", () => {
-        if (this.generation !== gen) return; // stale ffmpeg from previous track
         console.log(`[Audio] stdout end — frames encoded: ${this.opusFrames.length}, frameIndex: ${this.frameIndex}`);
         this.ffmpegDone = true;
       });
 
       this.ffmpeg.stdout?.on("data", (chunk: Buffer) => {
-        if (!this.playing || this.generation !== gen) return;
+        if (!this.playing) return;
 
         // Append to pooled PCM buffer (grow if needed)
         if (this.pcmPoolUsed + chunk.length > this.pcmPool.length) {
@@ -189,10 +185,6 @@ export class AudioPipeline extends EventEmitter {
       });
 
       this.ffmpeg.on("close", (code) => {
-        if (this.generation !== gen) {
-          console.log(`[Audio] ffmpeg close (stale gen=${gen}, current=${this.generation}) — ignoring`);
-          return;
-        }
         console.log(`[Audio] ffmpeg close code=${code} playing=${this.playing} ffmpegDone=${this.ffmpegDone}`);
         this.ffmpegDone = true;
 
@@ -342,11 +334,15 @@ export class AudioPipeline extends EventEmitter {
   /** Pause playback */
   pause(): void {
     this.paused = true;
+    // Pause ffmpeg's stdout so PCM stops flowing into opusFrames while paused.
+    // Without this, a long pause on a long track buffers the remaining audio in memory.
+    this.ffmpeg?.stdout?.pause();
   }
 
   /** Resume playback */
   resume(): void {
     this.paused = false;
+    this.ffmpeg?.stdout?.resume();
   }
 
   /** Set volume (0.0 - 1.0). Takes effect on next track. */

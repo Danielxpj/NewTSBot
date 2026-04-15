@@ -79,7 +79,13 @@ function runYtDlp(args: string[]): Promise<string> {
       stderr += data.toString();
     });
 
+    const timeout = setTimeout(() => {
+      proc.kill();
+      reject(new Error("yt-dlp timeout (30s)"));
+    }, 30000);
+
     proc.on("close", (code) => {
+      clearTimeout(timeout);
       if (code === 0) {
         resolve(stdout);
       } else {
@@ -90,14 +96,9 @@ function runYtDlp(args: string[]): Promise<string> {
     });
 
     proc.on("error", (err) => {
+      clearTimeout(timeout);
       reject(new Error(`yt-dlp not found. Install it: https://github.com/yt-dlp/yt-dlp\n${err.message}`));
     });
-
-    // Timeout after 30 seconds
-    setTimeout(() => {
-      proc.kill();
-      reject(new Error("yt-dlp timeout (30s)"));
-    }, 30000);
   });
 }
 

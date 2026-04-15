@@ -50,6 +50,32 @@ AUDIO_VOLUME=85
 | `!volume <0-100>` | Set volume |
 | `!help` | Show commands |
 
+> Commands accept either `!` or `/` as the prefix (e.g. `/play ...` works too).
+
+### Logging
+
+- `LOG_FILE=false` — disable writing to `logs/bot_*.log` (console only).
+- `LOG_CONSOLE=false` — silence stdout (file logging only; errors still printed).
+
+## Docker
+
+Runs anywhere Docker does — no Node/ffmpeg/yt-dlp install on the host.
+
+```bash
+cp .env.example .env      # fill in credentials
+docker compose up -d      # build and start
+docker compose logs -f    # follow logs
+docker compose down       # stop
+```
+
+- `logs/` is bind-mounted for persistent log files.
+- Image is Debian-slim + Node 20 + ffmpeg (apt) + yt-dlp (static binary from upstream).
+- Runs as non-root user `bot` (uid 1001).
+- `tini` handles PID 1 so `SIGTERM`/`SIGINT` cleanly trigger the bot's graceful shutdown.
+- `YTDLP_PATH` / `FFMPEG_PATH` in `.env` are ignored inside the container (compose overrides them to the image's Linux paths), so the same `.env` works for local Windows dev and Docker.
+
+To rebuild after code changes: `docker compose build --no-cache` or just `docker compose up -d --build`.
+
 ## Architecture
 
 - **ServerQuery** (TCP) - monitors channel chat, sends responses

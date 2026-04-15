@@ -1,7 +1,13 @@
 import fs from "fs";
 import path from "path";
+import { config as loadDotenv } from "dotenv";
 
-const fileLoggingEnabled = process.env.LOG_FILE !== "false";
+loadDotenv();
+
+const logEnv = (process.env.LOG_FILE ?? "").toLowerCase();
+const fileLoggingDisabled = logEnv === "false" || logEnv === "0" || logEnv === "off";
+const consoleSilenced = (process.env.LOG_CONSOLE ?? "").toLowerCase() === "false";
+const fileLoggingEnabled = !fileLoggingDisabled;
 
 const logsDir = path.join(process.cwd(), "logs");
 if (fileLoggingEnabled) {
@@ -26,8 +32,8 @@ function write(level: string, args: unknown[]): void {
   }
 }
 
-console.log = (...args: unknown[]) => { originalLog(...args); write("LOG", args); };
-console.warn = (...args: unknown[]) => { originalWarn(...args); write("WRN", args); };
+console.log = (...args: unknown[]) => { if (!consoleSilenced) originalLog(...args); write("LOG", args); };
+console.warn = (...args: unknown[]) => { if (!consoleSilenced) originalWarn(...args); write("WRN", args); };
 console.error = (...args: unknown[]) => { originalError(...args); write("ERR", args); };
 
 // Catch ALL crashes and write synchronously

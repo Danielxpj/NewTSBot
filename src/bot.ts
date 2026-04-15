@@ -11,6 +11,8 @@ export class MusicBot {
   private voiceClient: VoiceClient | null = null;
   private player: AudioPlayer | null = null;
   private running = false;
+  private voiceReconnectTimer: ReturnType<typeof setTimeout> | null = null;
+  private queryReconnectTimer: ReturnType<typeof setTimeout> | null = null;
 
   async start(): Promise<void> {
     console.log("=== TeamSpeak Music Bot ===\n");
@@ -32,7 +34,7 @@ export class MusicBot {
 
     this.running = true;
     console.log("\n[Bot] Ready! Listening for commands in channel chat.");
-    console.log("[Bot] Type !help in the channel for available commands.\n");
+    console.log("[Bot] Type !help or /help in the channel for available commands.\n");
   }
 
   private async checkDependencies(): Promise<void> {
@@ -63,59 +65,69 @@ export class MusicBot {
       `\n[Bot] Connecting voice to ${Config.ts.host}:${Config.ts.voicePort}...`
     );
 
-    this.voiceClient = new VoiceClient({
+    // Tear down previous instances if this is a reconnect
+    this.player?.stop();
+    this.player?.removeAllListeners();
+    this.player = null;
+    if (this.voiceClient) {
+      this.voiceClient.removeAllListeners();
+      try { this.voiceClient.disconnect(); } catch { /* */ }
+      this.voiceClient = null;
+    }
+
+    const voiceClient = new VoiceClient({
       host: Config.ts.host,
       port: Config.ts.voicePort,
       nickname: Config.ts.botNickname,
       channel: Config.ts.channel,
       serverPassword: Config.ts.serverPassword || undefined,
     });
+    this.voiceClient = voiceClient;
 
-    this.voiceClient.on("error", (err) => {
+    voiceClient.on("error", (err) => {
       console.error("[Voice] Error:", err.message);
     });
 
-    this.voiceClient.on("disconnected", () => {
+    voiceClient.on("disconnected", () => {
       console.log("[Voice] Disconnected");
-      if (this.running) {
+      if (this.running && !this.voiceReconnectTimer) {
         console.log("[Voice] Attempting reconnect in 5s...");
-        setTimeout(() => this.connectVoice(), 5000);
+        this.voiceReconnectTimer = setTimeout(() => {
+          this.voiceReconnectTimer = null;
+          this.connectVoice().catch((e) =>
+            console.error("[Voice] Reconnect failed:", (e as Error).message)
+          );
+        }, 5000);
       }
     });
 
-    try {
-      await this.voiceClient.connect();
-      console.log("[Voice] Connected successfully");
-    } catch (err) {
-      console.warn(
-        `[Voice] Connection failed: ${(err as Error).message}`
-      );
-      console.warn(
-        "[Voice] Bot will operate in command-only mode (no audio playback)"
-      );
-    }
-
-    // Listen for text messages via voice protocol
-    this.voiceClient!.on("textmessage", (event: { msg: string; invokerName: string }) => {
-      handleMessage(event.msg, event.invokerName, this.player!, (response) => {
+    voiceClient.on("textmessage", (event: { msg: string; invokerName: string }) => {
+      if (!this.player) return;
+      handleMessage(event.msg, event.invokerName, this.player, (response) => {
         this.sendChannelMessage(response);
       });
     });
 
-    // Create audio player
-    this.player = new AudioPlayer(this.voiceClient!, Config.audio.volume);
+    try {
+      await voiceClient.connect();
+      console.log("[Voice] Connected successfully");
+    } catch (err) {
+      console.warn(`[Voice] Connection failed: ${(err as Error).message}`);
+      console.warn("[Voice] Bot will operate in command-only mode (no audio playback)");
+    }
 
-    this.player.on("trackStart", (track) => {
-      this.sendChannelMessage(
-        `Now playing: ${track.title} [${track.duration}]`
-      );
+    const player = new AudioPlayer(voiceClient, Config.audio.volume);
+    this.player = player;
+
+    player.on("trackStart", (track) => {
+      this.sendChannelMessage(`Now playing: ${track.title} [${track.duration}]`);
     });
 
-    this.player.on("queueEmpty", () => {
+    player.on("queueEmpty", () => {
       this.sendChannelMessage("Queue finished.");
     });
 
-    this.player.on("trackError", (track, err) => {
+    player.on("trackError", (track, err) => {
       this.sendChannelMessage(
         `Failed to play: ${track.title} - ${(err as Error).message}`
       );
@@ -126,6 +138,13 @@ export class MusicBot {
     console.log(
       `[Bot] Connecting ServerQuery to ${Config.ts.host}:${Config.ts.queryPort}...`
     );
+
+    // Tear down previous instance if this is a reconnect
+    if (this.query) {
+      try { this.query.removeAllListeners(); } catch { /* */ }
+      try { await this.query.quit(); } catch { /* */ }
+      this.query = null;
+    }
 
     // Create instance first with autoConnect: false so we can attach
     // the error handler BEFORE the connection attempt. This prevents
@@ -178,9 +197,14 @@ export class MusicBot {
 
     this.query.on("close", () => {
       console.log("[Query] Connection closed");
-      if (this.running) {
+      if (this.running && !this.queryReconnectTimer) {
         console.log("[Query] Reconnecting in 5s...");
-        setTimeout(() => this.connectQuery(), 5000);
+        this.queryReconnectTimer = setTimeout(() => {
+          this.queryReconnectTimer = null;
+          this.connectQuery().catch((e) =>
+            console.error("[Query] Reconnect failed:", (e as Error).message)
+          );
+        }, 5000);
       }
     });
   }
@@ -204,6 +228,15 @@ export class MusicBot {
   async stop(): Promise<void> {
     console.log("\n[Bot] Shutting down...");
     this.running = false;
+
+    if (this.voiceReconnectTimer) {
+      clearTimeout(this.voiceReconnectTimer);
+      this.voiceReconnectTimer = null;
+    }
+    if (this.queryReconnectTimer) {
+      clearTimeout(this.queryReconnectTimer);
+      this.queryReconnectTimer = null;
+    }
 
     this.player?.stop();
     this.voiceClient?.disconnect();

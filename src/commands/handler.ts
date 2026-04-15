@@ -1,7 +1,15 @@
 import { AudioPlayer } from "../audio/player";
 import { TrackInfo } from "../audio/youtube";
 
-const PREFIX = "!";
+const PREFIXES = ["!", "/"] as const;
+const PRIMARY_PREFIX = PREFIXES[0];
+
+function stripPrefix(msg: string): string | null {
+  for (const p of PREFIXES) {
+    if (msg.startsWith(p)) return msg.slice(p.length);
+  }
+  return null;
+}
 
 type SendMessage = (msg: string) => void;
 
@@ -165,13 +173,13 @@ const commands: Command[] = [
     aliases: ["h", "commands"],
     description: "Show available commands",
     execute(ctx) {
-      let msg = "Commands:\n";
+      let msg = `Commands (prefix: ${PREFIXES.join(" or ")}):\n`;
       for (const cmd of commands) {
         const aliases =
           cmd.aliases.length > 0
-            ? ` (aliases: ${cmd.aliases.map((a) => PREFIX + a).join(", ")})`
+            ? ` (aliases: ${cmd.aliases.map((a) => PRIMARY_PREFIX + a).join(", ")})`
             : "";
-        msg += `${PREFIX}${cmd.name}${aliases} - ${cmd.description}\n`;
+        msg += `${PRIMARY_PREFIX}${cmd.name}${aliases} - ${cmd.description}\n`;
       }
       ctx.send(msg.trim());
     },
@@ -194,16 +202,17 @@ export function handleMessage(
   send: SendMessage
 ): void {
   const trimmed = message.trim();
-  if (!trimmed.startsWith(PREFIX)) return;
+  const body = stripPrefix(trimmed);
+  if (body === null) return;
 
-  const parts = trimmed.slice(PREFIX.length).split(/\s+/);
+  const parts = body.split(/\s+/);
   const cmdName = parts[0];
   const args = parts.slice(1);
 
   const cmd = findCommand(cmdName);
   if (!cmd) return; // Unknown command, silently ignore
 
-  console.log(`[CMD] ${invokerName}: ${PREFIX}${cmdName} ${args.join(" ")}`);
+  console.log(`[CMD] ${invokerName}: ${PRIMARY_PREFIX}${cmdName} ${args.join(" ")}`);
 
   const ctx: CommandContext = {
     player,

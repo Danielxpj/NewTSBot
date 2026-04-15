@@ -26,7 +26,7 @@ export const Config = {
     queryPassword: env("TS_QUERY_PASSWORD"),
   },
   audio: {
-    volume: parseInt(env("AUDIO_VOLUME", "10")) / 100,
+    volume: parseInt(env("AUDIO_VOLUME", "85")) / 100,
   },
   bin: {
     ytdlp: resolvePath(env("YTDLP_PATH", "./bin/yt-dlp.exe")),
